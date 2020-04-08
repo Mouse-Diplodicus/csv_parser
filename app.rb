@@ -29,8 +29,12 @@ end
 def parse_csv(input_csv, output_path)
   output_csv = CSV.open(output_path, "a+")
   puts input_csv.headers
+  is_hourly_data = false
   for row in input_csv
-    if row[:datetime][11,2] == "00"
+    if !is_hourly_data and row[:datetime][1,5] == "01/01"
+      is_hourly_data = true
+    end
+    if is_hourly_data and row[:datetime][11,2] == "00"
       output_csv << row
     end
   end
