@@ -1,6 +1,32 @@
 require 'csv'
+require 'json'
+require 'spreadsheet'
 
 HEADER_HASH = Hash.new
+PAT_DIR_HASH = Hash.new
+HEADERS = ['Date/Time', 'InteriorEquipment:Electricity [kWh](Hourly)',
+   'InteriorEquipment:Gas [therm](Hourly)', 'InteriorLights:Electricity [kWh](Hourly)',
+   'ExteriorLights:Electricity [kWh](Hourly)', 'WaterSystems:Electricity [kWh](Hourly)',
+   'WaterSystems:Gas [therm](Hourly)',  'Pumps:Electricity [kWh](Hourly)',
+   'Fans:Electricity [kWh](Hourly)',  'Heating:Electricity [kWh](Hourly)',
+   'Heating:Gas [therm](Hourly)',  'Cooling:Electricity [kWh](Hourly)',
+   'Whole Building:Facility Total Electric Demand Power [kWh](Hourly)',
+   'Electricity:Facility [kWh](Hourly)', 'Gas:Facility [therm](Hourly)']
+
+HEADER_CONVERT_HASH = Hash['InteriorEquipment:Electricity [J](Hourly)' => 'InteriorEquipment:Electricity [kWh](Hourly)',
+                           'InteriorEquipment:Gas [J](Hourly)' => 'InteriorEquipment:Gas [therm](Hourly)',
+                           'InteriorLights:Electricity [J](Hourly)' => 'InteriorLights:Electricity [kWh](Hourly)',
+                           'ExteriorLights:Electricity [J](Hourly)' => 'ExteriorLights:Electricity [kWh](Hourly)',
+                           'WaterSystems:Electricity [J](Hourly)' => 'WaterSystems:Electricity [kWh](Hourly)',
+                           'WaterSystems:Gas [J](Hourly)' => 'WaterSystems:Gas [therm](Hourly)',
+                           'Pumps:Electricity [J](Hourly)' => 'Pumps:Electricity [kWh](Hourly)',
+                           'Fans:Electricity [J](Hourly)' => 'Fans:Electricity [kWh](Hourly)',
+                           'Heating:Electricity [J](Hourly)' => 'Heating:Electricity [kWh](Hourly)',
+                           'Heating:Gas [J](Hourly)' => 'Heating:Gas [therm](Hourly)',
+                           'Cooling:Electricity [J](Hourly)' => 'Cooling:Electricity [kWh](Hourly)',
+                           'Whole Building:Facility Total Electric Demand Power [W](Hourly)' => 'Whole Building:Facility Total Electric Demand Power [kWh](Hourly)',
+                           'Electricity:Facility [J](TimeStep)' => 'Electricity:Facility [kWh](Hourly)',
+                           'Gas:Facility [J](TimeStep) ' => 'Gas:Facility [therm](Hourly)']
 
 def main(argv = [])
 
@@ -16,11 +42,58 @@ def main(argv = [])
   puts "root directory=#{root_dir}"
 
   output_path = calc_output_path(root_dir)
-  puts "output path=#{output_path}"
+  puts "Output path=#{output_path}"
 
-  csv_dir = "#{root_dir}/Example Files/eplusmtr.csv"
-  csv_table = load_csv(csv_dir)
-  parse_csv(csv_table, output_path)
+  build_pat_dir_hash(root_dir)
+  workbook = Spreadsheet::Workbook.new
+  PAT_DIR_HASH.each do |name, input_csv_dir|
+    puts "Generating sheet for #{name}"
+    sheet = workbook.create_worksheet :name => name
+
+    csv_table = load_csv(input_csv_dir)
+    csv_table = clean_csv(csv_table)
+    csv_table.by_col!()
+
+    HEADERS.each_with_index do |column_header, column|
+      sheet[0, column] = column_header
+      if HEADER_CONVERT_HASH.has_value? column_header
+        original_header = HEADER_CONVERT_HASH.key(column_header)
+        if column_header.include? '[kWh]' and original_header.include? '[J]'
+          csv_table[original_header].each_with_index do |cell, row|
+            sheet[row+1, column] = joules_to_kWh(cell.to_f)
+          end
+        elsif column_header.include? 'therm' and original_header.include? '[J]'
+          csv_table[original_header].each_with_index do |cell, row|
+            sheet[row+1, column] = joules_to_therm(cell.to_f)
+          end
+        elsif column_header.include? '[kWh]' and original_header.include? '[W]'
+          csv_table[original_header].each_with_index do |cell, row|
+            sheet[row+1, column] = cell.to_f/1000
+          end
+        end
+      elsif column_header == 'Date/Time'
+        csv_table[column_header].each_with_index do |cell, row|
+          sheet[row+1, column] = cell
+        end
+      else
+        csv_table[column_header].each_with_index do |cell, row|
+          sheet[row+1, column] = cell.to_f
+        end
+      end
+    end
+    puts "Done"
+  end
+  puts 'Writing output file'
+  workbook.write output_path
+end
+
+def build_pat_dir_hash(root_dir)
+  file = File.read("#{root_dir}/pat.json")
+  json = JSON.parse(file)
+  data_points = json["datapoints"]
+  data_points.each do |data_point|
+    PAT_DIR_HASH[data_point["name"]] = "#{root_dir}/perm_data/analysis_#{data_point["analysis_id"]}/data_point_#{data_point["_id"]}/run/eplusout.csv"
+  end
 end
 
 def load_csv(dir)
@@ -28,94 +101,40 @@ def load_csv(dir)
   return data
 end
 
-def parse_csv(csv_table, output_path)
-  build_header_hash(csv_table)
-  list_to_remove = query_user_for_headers()
-  puts "Removing columns selected by user"
-  csv_table.by_col!()
-  for key in list_to_remove
-    csv_table.delete(HEADER_HASH[key])
-    puts("deleted column: #{HEADER_HASH[key]}")
+def clean_csv(csv_table)
+  puts "Removing Design Days"
+  design_days_removed = false
+  count = 0
+  while !design_days_removed
+    csv_table.delete(1)
+    count += 1
+    if csv_table[1]['Date/Time'][1,5] == "01/01"
+      design_days_removed = true
+      puts "Design Days Removed: #{count}"
+    end
   end
-  csv_table.by_row!()
-  output_csv = CSV.open(output_path, "a+", headers: true)
-  if(output_csv.header_row?())
-    output_csv << csv_table.headers()
-  end
+
   puts "Removing non-hourly data points"
-  is_hourly_data = false
-  for row in csv_table
-    if !is_hourly_data and row['Date/Time'][1,5] == "01/01"
-      is_hourly_data = true
-    end
-    if is_hourly_data and row['Date/Time'][11,2] == "00"
-      output_csv << row
-    end
-  end
+  csv_table.delete_if {|row| row['Date/Time'][11,2] != "00"}
+
+  return csv_table
 end
 
 def calc_output_path(root_dir)
   t = Time.new
   t_string = "#{t.month}-#{t.day}_#{t.hour}h_#{t.min}m_#{t.sec}s"
-  output_path = "#{root_dir}/eplusmtr_clean_#{t_string}.csv"
+  output_path = "#{root_dir}/eplusout_clean_#{t_string}.xls"
   return output_path
 end
 
-def build_header_hash(csv_table)
-  index = 0
-  for header in csv_table.headers
-    HEADER_HASH[index] = header
-    index += 1
-  end
+def joules_to_therm(joules)
+  therm = joules/105480400
+  return therm
 end
 
-def query_user_for_headers()
-  HEADER_HASH.each do |key, header|
-    if key != 0
-      puts "#{key}:  #{header}"
-    end
-  end
-  puts "Select which columns you would like to remove. Valid inputs include "
-  puts "comma separated lists e.g. (1, 2, 5) or for a range input the starting"
-  puts "and ending values seperated by a dash (-) e.g. (7-11)"
-  user_input = gets.chomp
-  user_input = user_input.split(/,/)
-  list_to_remove = []
-  for item in user_input
-    if !item.include? '-'
-      list_to_remove << item.to_i
-    else
-      temp = item.split(/-/)
-      temp[0] = temp[0].to_i
-      temp[1] = temp[1].to_i
-      while temp[0] <= temp[1]
-        list_to_remove << temp[0]
-        temp[0] += 1
-      end
-    end
-  end
-  puts "Application will remove the following columns from the output csv:"
-  for key in list_to_remove
-    puts "#{key} - #{HEADER_HASH[key]}"
-  end
-  invalid_input = true
-  while invalid_input
-    puts "press y to confirm, n to reselect columns, or q to cancel"
-    user_input = gets.chomp
-    case user_input.downcase
-    when 'y'
-      invalid_input = false
-    when 'n'
-      list_to_remove = query_user_for_headers()
-      invalid_input = false
-    when 'q'
-      puts "quitting"
-      exit(0)
-    else
-      puts "invalid input"
-    end
-  end
-  return list_to_remove
+def joules_to_kWh(joules)
+  kWh = joules/3600000
+  return kWh
 end
 
 main(ARGV)
